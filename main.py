@@ -1,15 +1,19 @@
 from tkinter import Tk, ttk, Button, Entry
 import webbrowser as wb
+import keyboard as kb
+import mouse as ms
+import time
 from os import path, remove, mkdir
 from io import BytesIO
-from csv import reader, writer
 from gd import memory
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 import cv2
+import pickle as pk
+from scipy.signal import savgol_filter
 
-exe_list = ['GeometryDash', 'DontRenameMeThxDash']
+EXE_LIST = ['GeometryDash', 'DontRenameMeThxDash']
 text_field = 'Enter a save name here to start'
 
 
@@ -26,9 +30,9 @@ def popup(msg, btn='Okay'):
 
 def track(file_name, master_window):
     master_window.destroy()
-    global exe_list
+    global EXE_LIST
     mem = None
-    for p in exe_list:
+    for p in EXE_LIST:
         try:
             mem = memory.get_memory(p)
             break
@@ -37,46 +41,76 @@ def track(file_name, master_window):
     if not mem:
         popup('No GD process found!')
         return
-    if path.exists(file_name):
-        try:
-            data = list(reader(open(file_name, newline='')))
-        except FileNotFoundError:
-            popup('Error reading file! Please delete\n     the file or choose another.')
-            return
-    else:
-        data = []
     bg = np.full((69, 180, 3), 240, dtype=np.uint8)
     font = cv2.FONT_HERSHEY_COMPLEX
     img = cv2.putText(bg, 'Close this window', (15, 23), font, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
     img = cv2.putText(img, 'to stop tracking.', (17, 53), font, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-
-    def write_data(save_data):
-        save_data = [i for i in save_data if i != []]
-        writer(open(file_name, 'w', newline='')).writerows(save_data)
-    attempts = 0
     cv2.imshow('Tracking', img)
+
+    def save_data():
+        try:
+            to_save = pk.load(open(file_name, 'rb'))
+            to_save.append([d for d in data])
+        except FileNotFoundError:
+            to_save = data
+        pk.dump(to_save, open(file_name, 'wb'))
+
+    data = []
+    jumps = []
+    jump_timers = {}
+    jumping_click, jumping_up, jumping_space = False, False, False
+    while mem.is_dead() or not mem.is_in_level() or mem.get_percent == 0:
+        cv2.waitKey(1)
     while True:
-        if not cv2.getWindowProperty('Tracking', cv2.WND_PROP_VISIBLE):
-            write_data(data)
-            return
-        else:
+        c_time = time.time()
+        percent = mem.get_percent()
+        if cv2.getWindowProperty('Tracking', cv2.WND_PROP_VISIBLE):
             cv2.waitKey(1)
-        if mem.is_dead() or mem.get_percent() >= 100:
-            data.append([mem.get_percent()])
-            attempts += 1
+        else:
+            save_data()
+            return
+        if mem.is_dead() or percent >= 100:
+            data.append([mem.get_percent(), jumps])
+            jumps = []
             while mem.is_dead() or mem.get_percent() >= 100:
                 if not cv2.getWindowProperty('Tracking', cv2.WND_PROP_VISIBLE):
-                    write_data(data)
+                    save_data()
                     return
-                cv2.waitKey(100)
+                cv2.waitKey(1)
             if not cv2.getWindowProperty('Tracking', cv2.WND_PROP_VISIBLE):
-                write_data(data)
+                save_data()
                 return
+        if mem.is_in_level():
+            if not mem.is_dead() and percent < 100:
+                for i in jump_timers.values():
+                    if c_time - i >= 1:
+                        jumps.append([list(jump_timers)[list(jump_timers.values()).index(i)], percent])
+                        jump_timers = {k: v for k, v in jump_timers.items() if v != i}
+                if ms.is_pressed():
+                    if not jumping_click:
+                        jump_timers.update({percent: c_time})
+                        jumping_click = True
+                else:
+                    jumping_click = False
+                if kb.is_pressed('up'):
+                    if not jumping_up:
+                        jump_timers.update({percent: c_time})
+                        jumping_up = True
+                else:
+                    jumping_up = False
+                if kb.is_pressed('space'):
+                    if not jumping_space:
+                        jump_timers.update({percent: c_time})
+                        jumping_space = True
+                else:
+                    jumping_space = False
+            else:
+                jumps = []
 
 
-def graph(file_name, mode, rows=None):
+def graph(file_name, mode, rows=None, cps=True):
     if path.exists(file_name):
-        data = list(reader(open(file_name, newline='')))
+        data = pk.load(open(file_name, 'rb'))
     else:
         popup('File does not exist!')
         return
@@ -89,7 +123,8 @@ def graph(file_name, mode, rows=None):
     for i in data:
         if i not in unique:
             unique.append(i)
-    x, y = [], []
+    x_atts, y_atts = [], []
+
     if mode == 'show':
         try:
             for i in unique:
@@ -97,8 +132,8 @@ def graph(file_name, mode, rows=None):
                 for n in data:
                     if n[0] >= i[0]:
                         count += 1
-                x.append(float(i[0]))
-                y.append(int(count))
+                x_atts.append(float(i[0]))
+                y_atts.append(int(count))
         except ValueError:
             popup('Error reading file!')
             return
@@ -108,19 +143,46 @@ def graph(file_name, mode, rows=None):
             for n in data:
                 if n[0] >= i[0]:
                     count += 1
-            x.append(float(i[0]))
-            y.append(int(count))
-    x = sorted(x)
-    y = sorted(y, reverse=True)
+            x_atts.append(float(i[0]))
+            y_atts.append(int(count))
+    x_atts = sorted(x_atts)
+    y_atts = sorted(y_atts, reverse=True)
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(x, y)
-    plt.xlim((0, 100))
-    plt.ylim((0, max(y)))
-    plt.xlabel('Percent in Level')
-    plt.ylabel('Attempts')
-    tick_nums = [i for i in range(101) if i % 5 == 0]
-    plt.xticks(tick_nums, [str(i) + "%" for i in tick_nums])
+    x_cps = []
+    y_cps = []
+    points = np.linspace(0, 100, 1001)
+    for p in points:
+        atts = 0
+        clicks = 0
+        for i in data:
+            if i[0] > p:
+                atts += 1
+                for d in i[1]:
+                    if d[0] < p < d[1]:
+                        clicks += 1
+        if atts > 0:
+            x_cps.append(p)
+            y_cps.append(clicks / atts)
+    y_cps_smooth = savgol_filter(y_cps, 69, 7)
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    ax1.plot(x_atts, y_atts)
+    ax1.set_title(file_name.split('/')[1].split('.')[0])
+    ax1.set_xlim((0, 100))
+    ax1.set_ylim((0, max(y_atts)))
+    ax1.set_xlabel('Percent in Level')
+    plt.ylabel('Attempts', color='tab:blue')
+    tick_nums_atts = [i for i in range(101) if i % 5 == 0]
+    plt.xticks(tick_nums_atts, [str(i) + "%" for i in tick_nums_atts])
+
+    if cps:
+        ax2 = ax1.twinx()
+        ax2.set_yticks(np.linspace(0, 15, 6))
+        ax2.set_ylabel('Average CPS', color='tab:red')
+        ax2.plot(x_cps, y_cps_smooth, color='tab:red', linewidth=1)
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+        ax2.set_ylim((0, 15))
 
     if mode == 'show':
         plt.show()
@@ -137,7 +199,7 @@ def video(input_file, output_file, sps, master_window):
     master_window.destroy()
     sps = int(sps)
     if path.exists(input_file):
-        data = list(reader(open(input_file, newline='')))
+        pk.load(input_file)
         if not data:
             popup('File is empty!')
             return
@@ -148,28 +210,28 @@ def video(input_file, output_file, sps, master_window):
         remove(output_file)
     if sps < 60:
         fps = int(sps)
-        frame_rows = range(len(data)+1)
+        frame_rows = range(len(data) + 1)
     else:
         fps = 60
         counter = 1
         frame_rows = []
-        for i in range(len(data)+1):
+        for i in range(len(data) + 1):
             if counter >= 1 or i == len(data):
                 frame_rows.append(i)
                 counter -= 1
-            counter += 60/sps
+            counter += 60 / sps
     out = cv2.VideoWriter(output_file, cv2.VideoWriter_fourcc(*'mp4v'), fps, (1200, 600))
     rows = len(data)
     frame = 0
-    for i in range(1, rows+1):
+    for i in range(1, rows + 1):
         if i in frame_rows:
             frame += 1
             bg = np.full((69, 180, 3), 240, dtype=np.uint8)
             font = cv2.FONT_HERSHEY_COMPLEX
             img = cv2.putText(bg, 'Exporting video...', (15, 23), font, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-            completed = (frame/len(frame_rows))*135
+            completed = (frame / len(frame_rows)) * 135
             cv2.rectangle(img, (19, 38), (158, 52), (0, 0, 0), 1)
-            cv2.rectangle(img, (21, 40), (int(completed)+21, 50), (0, 0, 0), -1)
+            cv2.rectangle(img, (21, 40), (int(completed) + 21, 50), (0, 0, 0), -1)
             cv2.imshow('Rendering', img)
             cv2.waitKey(1)
             if not cv2.getWindowProperty('Rendering', cv2.WND_PROP_VISIBLE):
@@ -177,7 +239,7 @@ def video(input_file, output_file, sps, master_window):
                 remove(output_file)
                 return
             try:
-                out.write(graph(input_file, 'return', i))
+                out.write(graph(input_file, 'return', i), 'show', cps=False)
             except ValueError:
                 out.release()
                 cv2.destroyAllWindows()
@@ -208,7 +270,7 @@ def start_window():
         user_input = input_field.get()
         global text_field
         text_field = user_input
-        track(f'stats/{user_input}.csv', main_window)
+        track(f'stats/{user_input}.gdst', main_window)
         start_window()
 
     track_btn = Button(text='Track', command=lambda: get_track(), width=10)
@@ -216,10 +278,10 @@ def start_window():
 
     def get_graph():
         user_input = input_field.get()
-        if not path.exists(f'stats/{user_input}.csv'):
+        if not path.exists(f'stats/{user_input}.gdst'):
             popup('File does not exist!')
             return
-        graph(f'stats/{user_input}.csv', 'show')
+        graph(f'stats/{user_input}.gdst', 'show')
         start_window()
 
     graph_btn = Button(text='Graph', command=lambda: get_graph(), width=10)
@@ -239,10 +301,10 @@ def start_window():
         text_field = user_input
         if not path.exists('videos/'):
             mkdir('videos/')
-        if not path.exists(f'stats/{user_input}.csv'):
+        if not path.exists(f'stats/{user_input}.gdst'):
             popup('File does not exist!')
             return
-        video(f'stats/{user_input}.csv', f'videos/{user_input}.mp4', sps_field.get(), main_window)
+        video(f'stats/{user_input}.gdst', f'videos/{user_input}.mp4', sps_field.get(), main_window)
         start_window()
 
     video_btn = Button(text='Video', command=lambda: get_video(), width=10)
